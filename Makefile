@@ -1,4 +1,4 @@
-PROJECT       = blobstore-vault
+PROJECT       = blobstore_vault
 CAPABILITY_ID = wasmcloud:blobstore
 VENDOR        = "wasmCloud"
 NAME          = "Blobstore: Hashicorp Vault"
