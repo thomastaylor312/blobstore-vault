@@ -1,4 +1,4 @@
-name: BLOBSTORE_FS
+name: Blobstore Vault
 
 on:
   push:
@@ -9,10 +9,6 @@ on:
     branches: [main]
   workflow_dispatch:
     inputs:
-      release:
-        description: "Build github release (enter y)"
-        default: "n"
-        required: true
       artifact:
         description: "Build github release and push artifact (enter y)"
         default: "n"
@@ -34,7 +30,7 @@ jobs:
           test-options: --no-run
 
   build_artifact:
-    if: ${{ ( startswith(github.ref, 'refs/tags/') || github.events.inputs.artifact == 'y' || github.events.inputs.release == 'y' ) }}
+    if: ${{ ( startswith(github.ref, 'refs/tags/') || inputs.artifact == 'y' ) }}
     strategy:
       fail-fast: false
       matrix:
