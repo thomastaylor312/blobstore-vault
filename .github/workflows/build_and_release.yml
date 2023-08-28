@@ -1,0 +1,207 @@
+name: BLOBSTORE_FS
+
+on:
+  push:
+    branches: [main]
+    tags:
+      - "v*"
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      release:
+        description: "Build github release (enter y)"
+        default: "n"
+        required: true
+      artifact:
+        description: "Build github release and push artifact (enter y)"
+        default: "n"
+        required: true
+
+env:
+  CARGO_TERM_COLOR: always
+  WASH_ISSUER_KEY: ${{ secrets.TAYLOR_ACCOUNT_KEY }}
+  WASH_SUBJECT_KEY: ${{ secrets.BLOBSTORE_VAULT_KEY }}
+
+jobs:
+  rust_check:
+    runs-on: ubuntu-20.04
+    steps:
+      - uses: actions/checkout@v3
+      - id: rust-check-action
+        uses: wasmcloud/common-actions/rust-check@main
+        with:
+          test-options: --no-run
+
+  build_artifact:
+    if: ${{ ( startswith(github.ref, 'refs/tags/') || github.events.inputs.artifact == 'y' || github.events.inputs.release == 'y' ) }}
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+          # NOTE: We are building on an older version of ubuntu because of libc compatibility
+          # issues. Namely, if we build on a new version of libc, it isn't backwards compatible with
+          # old versions. But if we build on the old version, it is compatible with the newer
+          # versions running in ubuntu 22 and its ilk
+          - {
+              os: "ubuntu-20.04",
+              arch: "amd64",
+              extension: "",
+              targetPath: "target/release/",
+            }
+          - {
+              os: "ubuntu-20.04",
+              arch: "aarch64",
+              extension: "",
+              targetPath: "target/aarch64-unknown-linux-gnu/release/",
+            }
+          - {
+              os: "macos-latest",
+              arch: "amd64",
+              extension: "",
+              targetPath: "target/release/",
+            }
+          - {
+              os: "windows-latest",
+              arch: "amd64",
+              extension: ".exe",
+              targetPath: "target/release/",
+            }
+          - {
+              os: "macos-latest",
+              arch: "aarch64",
+              extension: "",
+              targetPath: "target/aarch64-apple-darwin/release/",
+            }
+    runs-on: ${{ matrix.config.os }}
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: lowercase the runner OS name
+        shell: bash
+        run: |
+          OS=$(echo "${{ runner.os }}" | tr '[:upper:]' '[:lower:]')
+          echo "RUNNER_OS=$OS" >> $GITHUB_ENV
+
+      - name: Install latest Rust stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+        if: matrix.config.arch != 'aarch64'
+        with:
+          toolchain: stable
+          components: clippy, rustfmt
+
+      - name: setup for cross-compile builds
+        if: matrix.config.arch == 'aarch64' && matrix.config.os == 'ubuntu-20.04'
+        run: |
+          sudo apt-get update
+          sudo apt install gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+          rustup toolchain install stable-aarch64-unknown-linux-gnu
+          rustup target add --toolchain stable-aarch64-unknown-linux-gnu aarch64-unknown-linux-gnu
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+          echo "CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+          echo "CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++" >> $GITHUB_ENV
+
+      - name: Install latest Rust stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+        if: matrix.config.arch == 'aarch64' && matrix.config.os == 'macos-latest'
+        with:
+          toolchain: stable
+          components: clippy, rustfmt
+          target: aarch64-apple-darwin
+
+      - name: Install latest Rust stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+        if: matrix.config.arch == 'aarch64' && matrix.config.os == 'ubuntu-20.04'
+        with:
+          toolchain: stable
+          components: clippy, rustfmt
+          target: aarch64-unknown-linux-gnu
+
+      - name: build release
+        if: matrix.config.arch != 'aarch64'
+        run: "cargo build --release"
+
+      - name: build release
+        if: matrix.config.arch == 'aarch64' && matrix.config.os == 'macos-latest'
+        run: "cargo build --release --target aarch64-apple-darwin"
+
+      - name: build release
+        if: matrix.config.arch == 'aarch64' && matrix.config.os == 'ubuntu-20.04'
+        run: "cargo build --release --target aarch64-unknown-linux-gnu"
+
+      - name: Determine artifact name
+        shell: bash
+        run: |
+          echo "artifact-name=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].targets[0].name')" >> $GITHUB_ENV
+
+      - uses: actions/upload-artifact@v3
+        with:
+          name: ${{ env.artifact-name }}-${{ env.RUNNER_OS }}-${{ matrix.config.arch }}
+          if-no-files-found: error
+          path: |
+            ${{ matrix.config.targetPath }}${{ env.artifact-name }}${{ matrix.config.extension }}
+
+  assemble_provider_archive:
+    needs: [rust_check, build_artifact]
+    runs-on: ubuntu-20.04
+    steps:
+      - uses: actions/checkout@v3
+      - uses: wasmcloud/common-actions/install-wash@main
+      # Downloads all artifacts
+      - uses: actions/download-artifact@v3
+        with:
+          path: ./
+
+      - name: Determine artifact name
+        run: |
+          echo "artifact-name=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].targets[0].name')" >> $GITHUB_ENV
+
+      - name: Create provider archive
+        run: |
+          mkdir -p target/release
+          mv ${{ env.artifact-name }}-linux-amd64/${{ env.artifact-name }} target/release/
+          make par
+
+      - name: Insert provider archive targets
+        run: |
+          wash par insert --arch x86_64-macos   --binary ${{ env.artifact-name }}-macos-amd64/${{ env.artifact-name }} build/${{ env.artifact-name }}.par.gz
+          wash par insert --arch aarch64-linux  --binary ${{ env.artifact-name }}-linux-aarch64/${{ env.artifact-name }} build/${{ env.artifact-name }}.par.gz
+          wash par insert --arch aarch64-macos  --binary ${{ env.artifact-name }}-macos-aarch64/${{ env.artifact-name }} build/${{ env.artifact-name }}.par.gz
+          wash par insert --arch x86_64-windows --binary ${{ env.artifact-name }}-windows-amd64/${{ env.artifact-name }}.exe build/${{ env.artifact-name }}.par.gz
+
+      - name: Upload provider archive to GH Actions
+        uses: actions/upload-artifact@v2
+        with:
+          name: provider-archive
+          path: build/${{ env.artifact-name }}.par.gz
+
+
+  artifact_release:
+    needs: assemble_provider_archive
+    if: ${{ ( startswith(github.ref, 'refs/tags/') || github.events.inputs.artifact == 'y' ) }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: wasmcloud/common-actions/install-wash@main
+      - name: Download provider archive
+        uses: actions/download-artifact@v3
+        with:
+          name: provider-archive
+          path: ./build
+      - name: Determine actor name
+        run: |
+          echo "provider-name=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[].name')" >> $GITHUB_ENV
+      - name: Determine provider version
+        if: startswith(github.ref, 'refs/tags/') # Only run on tag push
+        run: |
+          echo "provider-version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[].version')" >> $GITHUB_ENV
+      - name: Determine actor version (main)
+        if: ${{ !startswith(github.ref, 'refs/tags/') }}
+        run: |
+          echo "provider-version=latest" >> $GITHUB_ENV
+      - name: Push actor to GHCR
+        env:
+          WASH_REG_USER: ${{ github.repository_owner }}
+          WASH_REG_PASSWORD: ${{ secrets.PUSH_TOKEN }}
+        run: |
+          wash reg push ghcr.io/${{ github.REPOSITORY }}:${{ env.provider-version }} build/${{ env.oci-repository }}.par.gz -a org.opencontainers.image.source=https://github.com/${{ github.REPOSITORY }} --allow-latest
