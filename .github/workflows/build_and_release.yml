@@ -10,14 +10,16 @@ on:
   workflow_dispatch:
     inputs:
       artifact:
-        description: "Build github release and push artifact (enter y)"
-        default: "n"
+        description: "Build and push artifact"
+        default: false
+        type: boolean
         required: true
 
 env:
   CARGO_TERM_COLOR: always
   WASH_ISSUER_KEY: ${{ secrets.TAYLOR_ACCOUNT_KEY }}
   WASH_SUBJECT_KEY: ${{ secrets.BLOBSTORE_VAULT_KEY }}
+  artifact-name: blobstore_vault
 
 jobs:
   rust_check:
@@ -30,7 +32,7 @@ jobs:
           test-options: --no-run
 
   build_artifact:
-    if: ${{ ( startswith(github.ref, 'refs/tags/') || inputs.artifact == 'y' ) }}
+    if: ${{ ( startswith(github.ref, 'refs/tags/') || inputs.artifact ) }}
     strategy:
       fail-fast: false
       matrix:
@@ -124,12 +126,7 @@ jobs:
       - name: build release
         if: matrix.config.arch == 'aarch64' && matrix.config.os == 'ubuntu-20.04'
         run: "cargo build --release --target aarch64-unknown-linux-gnu"
-
-      - name: Determine artifact name
-        shell: bash
-        run: |
-          echo "artifact-name=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].targets[0].name')" >> $GITHUB_ENV
-
+      
       - uses: actions/upload-artifact@v3
         with:
           name: ${{ env.artifact-name }}-${{ env.RUNNER_OS }}-${{ matrix.config.arch }}
@@ -147,10 +144,6 @@ jobs:
       - uses: actions/download-artifact@v3
         with:
           path: ./
-
-      - name: Determine artifact name
-        run: |
-          echo "artifact-name=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].targets[0].name')" >> $GITHUB_ENV
 
       - name: Create provider archive
         run: |
@@ -174,7 +167,7 @@ jobs:
 
   artifact_release:
     needs: assemble_provider_archive
-    if: ${{ ( startswith(github.ref, 'refs/tags/') || github.events.inputs.artifact == 'y' ) }}
+    if: ${{ ( startswith(github.ref, 'refs/tags/') || inputs.artifact ) }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
